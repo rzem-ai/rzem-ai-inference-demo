@@ -212,27 +212,32 @@ async fn main() -> Result<()> {
             }
             println!();
 
-            // Try to create device 0 with detailed error reporting
-            let device = match candle_core::Device::new_cuda(0) {
+            // Try to create device with detailed error reporting
+            // NOTE: With CUDA_VISIBLE_DEVICES=0, only physical GPU 0 should be visible
+            // and Candle should map it to its device index 0
+            println!("  Attempting Device::new_cuda(0)...");
+            let device_result = candle_core::Device::new_cuda(0);
+
+            let device = match device_result {
                 Ok(dev) => {
-                    println!("  ✓ Successfully created CUDA device 0");
+                    println!("  ✓ Device::new_cuda(0) succeeded");
+                    println!("  Device object: {:?}", dev);
                     dev
                 }
                 Err(e) => {
-                    eprintln!("  ❌ Failed to create CUDA device 0: {}", e);
-                    eprintln!("  Attempting fallback to cuda_if_available(0)...");
-
-                    match candle_core::Device::cuda_if_available(0) {
-                        Ok(dev) => {
-                            println!("  ⚠️  Fallback succeeded, but device may differ");
-                            dev
-                        }
-                        Err(e2) => {
-                            eprintln!("  ❌ Fallback also failed: {}", e2);
-                            eprintln!("  Falling back to CPU");
-                            candle_core::Device::Cpu
-                        }
-                    }
+                    eprintln!("  ❌ Device::new_cuda(0) failed: {}", e);
+                    eprintln!();
+                    eprintln!("  This is unexpected! With CUDA_VISIBLE_DEVICES=0,");
+                    eprintln!("  device 0 should be available.");
+                    eprintln!();
+                    eprintln!("  Possible causes:");
+                    eprintln!("    1. Another process is using the GPU exclusively");
+                    eprintln!("    2. CUDA driver/runtime mismatch");
+                    eprintln!("    3. Insufficient permissions");
+                    eprintln!();
+                    eprintln!("  Run 'nvidia-smi' to check GPU status");
+                    eprintln!();
+                    std::process::exit(1);
                 }
             };
 
@@ -242,28 +247,48 @@ async fn main() -> Result<()> {
             match &device {
                 candle_core::Device::Cuda(cuda_device) => {
                     println!("  CUDA Device ID: {:?}", cuda_device);
-                    println!("  Expected: RTX 5090 (32GB VRAM) on device 0");
-                    println!();
-
-                    // CRITICAL: Verify this is actually device 0
                     let device_str = format!("{:?}", cuda_device);
+
+                    // Try to query actual device properties using nvidia-smi
+                    println!();
+                    println!("  Verifying device properties...");
+
+                    // Check which physical GPU is actually being used
+                    if let Ok(output) = std::process::Command::new("nvidia-smi")
+                        .args(&["--query-compute-apps=pid,used_gpu_memory,gpu_name,gpu_bus_id", "--format=csv,noheader"])
+                        .output()
+                    {
+                        if output.status.success() {
+                            let running_apps = String::from_utf8_lossy(&output.stdout);
+                            if !running_apps.trim().is_empty() {
+                                println!("  Current GPU usage:");
+                                for line in running_apps.lines() {
+                                    println!("    {}", line);
+                                }
+                            }
+                        }
+                    }
+
+                    // CRITICAL: Check if DeviceId matches expected
                     if device_str.contains("DeviceId(1)") {
+                        eprintln!();
                         eprintln!("╔════════════════════════════════════════════════════════╗");
-                        eprintln!("║  ⚠️  CRITICAL WARNING: Using WRONG GPU!               ║");
+                        eprintln!("║  ⚠️  UNEXPECTED DEVICE ID                             ║");
                         eprintln!("╚════════════════════════════════════════════════════════╝");
                         eprintln!();
-                        eprintln!("Expected: Device 0 (RTX 5090 with 32GB VRAM)");
-                        eprintln!("Actual:   Device 1");
+                        eprintln!("Candle reported DeviceId(1), but nvidia-smi shows only");
+                        eprintln!("one GPU (index 0 - RTX 5090).");
                         eprintln!();
-                        eprintln!("This will likely cause OOM errors!");
+                        eprintln!("This may be a Candle internal ID that doesn't match");
+                        eprintln!("physical GPU indices. We'll proceed, but if you get");
+                        eprintln!("OOM errors, this device ID mismatch may be the cause.");
                         eprintln!();
-                        eprintln!("Possible fixes:");
-                        eprintln!("  1. Check CUDA_VISIBLE_DEVICES environment variable");
-                        eprintln!("  2. Ensure no other process is using device 0");
-                        eprintln!("  3. Try setting CUDA_VISIBLE_DEVICES=0 explicitly");
-                        eprintln!();
-                        std::process::exit(1);
+                        eprintln!("Press Ctrl+C to abort, or wait 5 seconds to continue...");
+                        std::thread::sleep(std::time::Duration::from_secs(5));
+                    } else {
+                        println!("  ✓ Device ID matches expected: device 0");
                     }
+                    println!();
                 }
                 candle_core::Device::Metal(metal_device) => {
                     println!("  Metal Device ID: {:?}", metal_device);
