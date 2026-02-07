@@ -35,7 +35,7 @@ pub struct ComparisonResult {
 /// # Returns
 /// Paths to both generated images
 pub fn compare_with_without_lora<P: AsRef<Path>>(
-    pipeline: &mut FluxPipeline,
+    pipeline: &FluxPipeline,
     flux_gguf_path: P,
     prompt: &str,
     lora_path: P,
@@ -65,13 +65,24 @@ pub fn compare_with_without_lora<P: AsRef<Path>>(
     // BASELINE: Generate without LoRA
     // ========================================================================
     info!("┌─ Baseline Generation (No LoRA) ──────────────────────┐");
-    let flux_baseline = FluxModel::load_with_loras(
-        flux_gguf_path,
-        &[], // No LoRAs
-        &device,
-    )?;
 
-    let baseline_png = pipeline.generate(&flux_baseline, prompt, 28, 1024, 1024, seed)?;
+    let baseline_png = {
+        // Load FLUX, generate, then drop to free ~12GB VRAM
+        let flux_baseline = FluxModel::load_with_loras(
+            flux_gguf_path,
+            &[], // No LoRAs
+            &device,
+        )?;
+
+        let png = pipeline.generate(&flux_baseline, prompt, 28, 1024, 1024, seed)?;
+
+        // Explicitly drop FLUX model to free VRAM before next generation
+        drop(flux_baseline);
+        info!("  ✓ FLUX model unloaded (freed ~12GB VRAM)");
+
+        png
+    };
+
     let baseline_path = output_dir.join("baseline.png");
     std::fs::write(&baseline_path, &baseline_png)?;
     info!("└─ ✓ Saved: {}", baseline_path.display());
@@ -82,28 +93,37 @@ pub fn compare_with_without_lora<P: AsRef<Path>>(
     // ========================================================================
     info!("┌─ LoRA Generation (Strength: {}) ─────────────────┐", strength);
 
-    // Load LoRA adapter
-    let lora_name = lora_path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("lora")
-        .to_string();
+    let with_lora_png = {
+        // Load LoRA adapter
+        let lora_name = lora_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("lora")
+            .to_string();
 
-    let lora = LoraAdapter::load(lora_path, lora_name, &device, DType::F32)?;
+        let lora = LoraAdapter::load(lora_path, lora_name, &device, DType::F32)?;
 
-    info!("  LoRA loaded: {} weight pairs (rank {})",
-        lora.weight_count(),
-        lora.weights.values().next().map(|w| w.rank).unwrap_or(0)
-    );
+        info!("  LoRA loaded: {} weight pairs (rank {})",
+            lora.weight_count(),
+            lora.weights.values().next().map(|w| w.rank).unwrap_or(0)
+        );
 
-    // Load FLUX with LoRA injected
-    let flux_with_lora = FluxModel::load_with_loras(
-        flux_gguf_path,
-        &[(lora, strength)],
-        &device,
-    )?;
+        // Load FLUX with LoRA injected
+        let flux_with_lora = FluxModel::load_with_loras(
+            flux_gguf_path,
+            &[(lora, strength)],
+            &device,
+        )?;
 
-    let with_lora_png = pipeline.generate(&flux_with_lora, prompt, 28, 1024, 1024, seed)?;
+        let png = pipeline.generate(&flux_with_lora, prompt, 28, 1024, 1024, seed)?;
+
+        // Explicitly drop FLUX model to free VRAM
+        drop(flux_with_lora);
+        info!("  ✓ FLUX model unloaded (freed ~12GB VRAM)");
+
+        png
+    };
+
     let with_lora_path = output_dir.join("with_lora.png");
     std::fs::write(&with_lora_path, &with_lora_png)?;
     info!("└─ ✓ Saved: {}", with_lora_path.display());

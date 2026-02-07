@@ -14,16 +14,24 @@ use tracing::{debug, info};
 
 use crate::models::{ClipTextEncoder, FluxModel, T5TextEncoder, VaeDecoder};
 
-/// Complete FLUX.1-dev generation pipeline
+/// Complete FLUX.1-dev generation pipeline with sequential model loading
+///
+/// Loads models only when needed and drops them to minimize VRAM usage.
+/// This allows running on 16GB GPUs by avoiding keeping all models loaded simultaneously.
 pub struct FluxPipeline {
-    pub t5: T5TextEncoder,
-    pub clip: ClipTextEncoder,
-    pub vae: VaeDecoder,
+    // Store paths instead of loaded models
+    t5_gguf_path: std::path::PathBuf,
+    t5_tokenizer_path: std::path::PathBuf,
+    clip_safetensors_path: std::path::PathBuf,
+    clip_tokenizer_path: std::path::PathBuf,
+    vae_safetensors_path: std::path::PathBuf,
     device: Device,
 }
 
 impl FluxPipeline {
-    /// Create a new FLUX pipeline by loading all components
+    /// Create a new FLUX pipeline by storing model paths
+    ///
+    /// Models will be loaded sequentially during generation to minimize VRAM usage.
     ///
     /// # Arguments
     /// * `model_paths` - Paths to all required model files
@@ -36,19 +44,29 @@ impl FluxPipeline {
         vae_safetensors: P,
         device: Device,
     ) -> Result<Self> {
-        info!("Initializing FLUX.1-dev pipeline");
+        info!("Initializing FLUX.1-dev pipeline (sequential loading)");
 
-        // Load encoders
-        let t5 = T5TextEncoder::load(t5_gguf, t5_tokenizer, device.clone())?;
-        let clip = ClipTextEncoder::load(clip_safetensors, clip_tokenizer, device.clone())?;
-        let vae = VaeDecoder::load(vae_safetensors, device.clone())?;
-
-        info!("✓ Pipeline initialized successfully");
-
-        Ok(Self { t5, clip, vae, device })
+        // Just store paths - models will be loaded on-demand
+        Ok(Self {
+            t5_gguf_path: t5_gguf.as_ref().to_path_buf(),
+            t5_tokenizer_path: t5_tokenizer.as_ref().to_path_buf(),
+            clip_safetensors_path: clip_safetensors.as_ref().to_path_buf(),
+            clip_tokenizer_path: clip_tokenizer.as_ref().to_path_buf(),
+            vae_safetensors_path: vae_safetensors.as_ref().to_path_buf(),
+            device,
+        })
     }
 
     /// Generate an image from a text prompt using FLUX transformer
+    ///
+    /// Uses sequential model loading to minimize VRAM usage:
+    /// 1. Load T5, encode, drop T5
+    /// 2. Load CLIP, encode, drop CLIP
+    /// 3. Denoise with FLUX
+    /// 4. Drop FLUX
+    /// 5. Load VAE, decode, drop VAE
+    ///
+    /// This allows running on 16GB GPUs.
     ///
     /// # Arguments
     /// * `flux` - FLUX model (with or without LoRAs)
@@ -61,7 +79,7 @@ impl FluxPipeline {
     /// # Returns
     /// PNG image data as Vec<u8>
     pub fn generate(
-        &mut self,
+        &self,
         flux: &FluxModel,
         prompt: &str,
         steps: usize,
@@ -74,42 +92,59 @@ impl FluxPipeline {
             steps = steps,
             size = format!("{}x{}", width, height),
             seed = seed,
-            "Starting generation"
+            "Starting generation (sequential loading)"
         );
 
-        // Step 1: Encode prompt with T5
-        info!("Step 1/3: Encoding prompt with T5");
-        let t5_emb = self.t5.encode(prompt)?;
-        info!(t5_shape = ?t5_emb.dims(), "T5 embedding shape");
-        debug!(shape = ?t5_emb.dims(), "T5 embeddings");
+        // Step 1: Load T5, encode, then drop to free VRAM
+        info!("Step 1/5: Encoding prompt with T5");
+        let t5_emb = {
+            let mut t5 = T5TextEncoder::load(&self.t5_gguf_path, &self.t5_tokenizer_path, self.device.clone())?;
+            let emb = t5.encode(prompt)?;
+            debug!(shape = ?emb.dims(), "T5 encoded");
+            // t5 dropped here, freeing ~9GB
+            emb
+        };
 
-        // Step 2: Encode prompt with CLIP
-        info!("Step 2/3: Encoding prompt with CLIP");
-        let clip_emb = self.clip.encode(prompt)?;
-        info!(clip_shape = ?clip_emb.dims(), "CLIP embedding shape");
-        debug!(shape = ?clip_emb.dims(), "CLIP embeddings");
+        // Step 2: Load CLIP, encode, then drop to free VRAM
+        info!("Step 2/5: Encoding prompt with CLIP");
+        let clip_emb = {
+            let mut clip = ClipTextEncoder::load(&self.clip_safetensors_path, &self.clip_tokenizer_path, self.device.clone())?;
+            let emb = clip.encode(prompt)?;
+            debug!(shape = ?emb.dims(), "CLIP encoded");
+            // clip dropped here, freeing ~350MB
+            emb
+        };
 
-        // Step 3: Denoise with FLUX
-        info!("Step 3/3: Denoising with FLUX ({} steps)", steps);
+        // Step 3: Denoise with FLUX (FLUX already loaded by caller)
+        info!("Step 3/5: Denoising with FLUX ({} steps)", steps);
         let latents = self.denoise(flux, &t5_emb, &clip_emb, height, width, steps, seed)?;
         debug!(shape = ?latents.dims(), "Latents generated");
 
-        // Step 4: VAE decode
-        info!("Step 4/3: Decoding latents to RGB");
+        // At this point, caller should drop FLUX to free ~12GB before VAE loading
+        // (done in compare.rs)
 
-        // Convert to BF16 for VAE (VAE expects BF16 on CUDA, F32 on CPU)
-        let latents_for_vae = if self.device.is_cuda() {
-            latents.to_dtype(DType::BF16)?
-        } else {
-            latents
+        // Step 4: Load VAE, decode, then drop
+        info!("Step 4/5: Decoding latents to RGB");
+        let rgb_data = {
+            let vae = VaeDecoder::load(&self.vae_safetensors_path, self.device.clone())?;
+
+            // Convert to BF16 for VAE (VAE expects BF16 on CUDA, F32 on CPU)
+            let latents_for_vae = if self.device.is_cuda() {
+                latents.to_dtype(DType::BF16)?
+            } else {
+                latents
+            };
+
+            let image = vae.decode(&latents_for_vae)?;
+            debug!(shape = ?image.dims(), "Image decoded");
+
+            let rgb = vae.tensor_to_rgb(&image)?;
+            // vae dropped here, freeing ~350MB
+            rgb
         };
 
-        let image = self.vae.decode(&latents_for_vae)?;
-        debug!(shape = ?image.dims(), "Image decoded");
-
         // Step 5: Convert to PNG
-        info!("Step 5/3: Encoding PNG");
-        let rgb_data = self.vae.tensor_to_rgb(&image)?;
+        info!("Step 5/5: Encoding PNG");
         let png_data = self.encode_png(&rgb_data, width as u32, height as u32)?;
 
         info!(size_kb = png_data.len() / 1024, "✓ Generation complete!");
