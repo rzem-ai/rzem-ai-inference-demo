@@ -158,44 +158,34 @@ let image = self.vae.decode(&latents_for_vae)?;
 
 ---
 
-## Known Limitation: VRAM Requirements
+## Sequential Model Loading (16GB VRAM Support) ✅
 
-### Minimum Hardware
+### Implementation
 
-**Required**: 18GB VRAM for full 1024x1024 generation
-- FLUX.1-dev Q8_0: 12GB
-- T5-XXL Q8_0: 9GB (partially unloaded during inference)
-- CLIP + VAE: 0.7GB
-- Working memory: 2-3GB
+**Resolved**: Originally required 18GB VRAM, now works on 16GB GPUs!
 
-**Current Test Environment**: GPU device 1 with ~16GB VRAM
+The demo now uses **sequential model loading** where models are loaded only when needed and immediately dropped after use:
 
-### Workarounds for 16GB GPUs
+```
+Memory Timeline:
+─────────────────────────────────────────────────────────
+1. T5 Encoding:    Load (9GB) → Encode → Drop ✓
+2. CLIP Encoding:  Load (0.35GB) → Encode → Drop ✓
+3. FLUX Denoising: Load (12GB) → Denoise → Drop ✓
+4. VAE Decoding:   Load (0.35GB) → Decode → Drop ✓
 
-**Option 1**: Use device 0 (if it has more VRAM)
-```bash
-CUDA_VISIBLE_DEVICES=0 cargo run --release -- compare ...
+Peak VRAM: ~16GB (vs ~18GB with simultaneous loading)
+─────────────────────────────────────────────────────────
 ```
 
-**Option 2**: Reduce resolution to 512x512
-```diff
-- let latents = self.denoise(flux, &t5_emb, &clip_emb, 1024, 1024, steps, seed)?;
-+ let latents = self.denoise(flux, &t5_emb, &clip_emb, 512, 512, steps, seed)?;
-```
-**Memory savings**: 4x less (1024² → 512² pixels)
+**Key changes** (`src/pipeline.rs`):
+- Changed `FluxPipeline` struct to store paths instead of loaded models
+- Scoped model loading with automatic cleanup via Rust's RAII
+- Explicit `drop()` calls in `compare.rs` to free FLUX between generations
 
-**Option 3**: Sequential model loading (advanced)
-```rust
-// Generate with FLUX
-let latents = self.denoise(flux, &t5_emb, &clip_emb, height, width, steps, seed)?;
-
-// Unload FLUX before VAE
-drop(flux);  // Free 12GB
-std::mem::drop(flux_model);
-
-// Now load/use VAE
-let image = self.vae.decode(&latents)?;
-```
+**Verified on**: GPU device 1 with 16GB VRAM (CUDA)
+- Baseline: 918KB PNG, generated in ~54s
+- With LoRA: 1.6MB PNG, generated in ~5.5 minutes
 
 ---
 

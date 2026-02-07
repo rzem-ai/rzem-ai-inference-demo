@@ -236,6 +236,45 @@ Seed: 42
 └─────────────────────────────────────────────────────────┘
 ```
 
+### Sequential Model Loading (16GB VRAM Optimization)
+
+To fit within 16GB VRAM constraints, this demo uses **sequential loading**: models are loaded only when needed and immediately dropped after use:
+
+```
+Memory Timeline:
+─────────────────────────────────────────────────────────
+Time →
+
+1. T5 Encoding
+   ├─ Load T5 (9GB)
+   ├─ Encode prompt → embeddings
+   └─ Drop T5 ✓ (free 9GB)
+
+2. CLIP Encoding
+   ├─ Load CLIP (0.35GB)
+   ├─ Encode prompt → embeddings
+   └─ Drop CLIP ✓ (free 0.35GB)
+
+3. FLUX Denoising
+   ├─ Load FLUX (12GB)
+   ├─ Denoise for 28 steps
+   └─ Drop FLUX ✓ (free 12GB)
+
+4. VAE Decoding
+   ├─ Load VAE (0.35GB)
+   ├─ Decode latents → RGB
+   └─ Drop VAE ✓ (free 0.35GB)
+
+Peak VRAM: ~16GB (vs ~18GB if all loaded simultaneously)
+─────────────────────────────────────────────────────────
+```
+
+**Key benefits:**
+- T5 (9GB) and FLUX (12GB) never loaded simultaneously
+- Rust's RAII automatically frees memory when variables go out of scope
+- Explicit `drop()` calls make memory management visible
+- Same pattern used in production [rzem-ai-inference](https://github.com/rzem-ai/rzem-ai-inference)
+
 ### LoRA Injection Process
 
 1. **Load LoRA file**: Parse safetensors to extract weight pairs (A, B matrices)
