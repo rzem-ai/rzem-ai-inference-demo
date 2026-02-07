@@ -68,6 +68,12 @@ enum Commands {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // CRITICAL: Set CUDA_VISIBLE_DEVICES=0 BEFORE any CUDA initialization
+    // This must be done before logging or any other code that might touch CUDA
+    if std::env::var("CUDA_VISIBLE_DEVICES").is_err() {
+        std::env::set_var("CUDA_VISIBLE_DEVICES", "0");
+    }
+
     // Initialize logging
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -184,9 +190,51 @@ async fn main() -> Result<()> {
             }
 
             // Initialize device - explicitly use GPU 0
-            println!("📌 Selecting GPU device 0...");
-            let device = candle_core::Device::new_cuda(0)
-                .or_else(|_| candle_core::Device::cuda_if_available(0))?;
+            println!("📌 Selecting GPU device 0 (RTX 5090)...");
+            println!();
+
+            // CRITICAL: Ensure CUDA_VISIBLE_DEVICES is set to 0 to force RTX 5090
+            let cuda_visible_devices = std::env::var("CUDA_VISIBLE_DEVICES");
+            match &cuda_visible_devices {
+                Ok(val) if val != "0" => {
+                    println!("  ⚠️  CUDA_VISIBLE_DEVICES is set to: {}", val);
+                    println!("  Overriding to '0' to ensure RTX 5090 is used");
+                    std::env::set_var("CUDA_VISIBLE_DEVICES", "0");
+                }
+                Ok(val) => {
+                    println!("  ✓ CUDA_VISIBLE_DEVICES already set to: {}", val);
+                }
+                Err(_) => {
+                    println!("  ⚠️  CUDA_VISIBLE_DEVICES not set");
+                    println!("  Setting to '0' to explicitly use RTX 5090");
+                    std::env::set_var("CUDA_VISIBLE_DEVICES", "0");
+                }
+            }
+            println!();
+
+            // Try to create device 0 with detailed error reporting
+            let device = match candle_core::Device::new_cuda(0) {
+                Ok(dev) => {
+                    println!("  ✓ Successfully created CUDA device 0");
+                    dev
+                }
+                Err(e) => {
+                    eprintln!("  ❌ Failed to create CUDA device 0: {}", e);
+                    eprintln!("  Attempting fallback to cuda_if_available(0)...");
+
+                    match candle_core::Device::cuda_if_available(0) {
+                        Ok(dev) => {
+                            println!("  ⚠️  Fallback succeeded, but device may differ");
+                            dev
+                        }
+                        Err(e2) => {
+                            eprintln!("  ❌ Fallback also failed: {}", e2);
+                            eprintln!("  Falling back to CPU");
+                            candle_core::Device::Cpu
+                        }
+                    }
+                }
+            };
 
             println!("✓ Using device: {:?}", device);
 
@@ -194,7 +242,28 @@ async fn main() -> Result<()> {
             match &device {
                 candle_core::Device::Cuda(cuda_device) => {
                     println!("  CUDA Device ID: {:?}", cuda_device);
-                    println!("  Expected: RTX 5090 (32GB VRAM)");
+                    println!("  Expected: RTX 5090 (32GB VRAM) on device 0");
+                    println!();
+
+                    // CRITICAL: Verify this is actually device 0
+                    let device_str = format!("{:?}", cuda_device);
+                    if device_str.contains("DeviceId(1)") {
+                        eprintln!("╔════════════════════════════════════════════════════════╗");
+                        eprintln!("║  ⚠️  CRITICAL WARNING: Using WRONG GPU!               ║");
+                        eprintln!("╚════════════════════════════════════════════════════════╝");
+                        eprintln!();
+                        eprintln!("Expected: Device 0 (RTX 5090 with 32GB VRAM)");
+                        eprintln!("Actual:   Device 1");
+                        eprintln!();
+                        eprintln!("This will likely cause OOM errors!");
+                        eprintln!();
+                        eprintln!("Possible fixes:");
+                        eprintln!("  1. Check CUDA_VISIBLE_DEVICES environment variable");
+                        eprintln!("  2. Ensure no other process is using device 0");
+                        eprintln!("  3. Try setting CUDA_VISIBLE_DEVICES=0 explicitly");
+                        eprintln!();
+                        std::process::exit(1);
+                    }
                 }
                 candle_core::Device::Metal(metal_device) => {
                     println!("  Metal Device ID: {:?}", metal_device);
