@@ -57,6 +57,91 @@ impl FluxPipeline {
         })
     }
 
+    /// Encode prompt to embeddings (can be reused for multiple generations)
+    ///
+    /// Use this when generating multiple images with the same prompt to avoid
+    /// reloading T5/CLIP each time.
+    ///
+    /// # Returns
+    /// (T5 embeddings, CLIP embeddings)
+    pub fn encode_prompt(&self, prompt: &str) -> Result<(Tensor, Tensor)> {
+        // Load T5, encode, then drop
+        info!("Encoding prompt with T5");
+        let t5_emb = {
+            let mut t5 = T5TextEncoder::load(&self.t5_gguf_path, &self.t5_tokenizer_path, self.device.clone())?;
+            let emb = t5.encode(prompt)?;
+            debug!(shape = ?emb.dims(), "T5 encoded");
+            emb
+        };
+
+        // Load CLIP, encode, then drop
+        info!("Encoding prompt with CLIP");
+        let clip_emb = {
+            let mut clip = ClipTextEncoder::load(&self.clip_safetensors_path, &self.clip_tokenizer_path, self.device.clone())?;
+            let emb = clip.encode(prompt)?;
+            debug!(shape = ?emb.dims(), "CLIP encoded");
+            emb
+        };
+
+        Ok((t5_emb, clip_emb))
+    }
+
+    /// Generate image using pre-computed embeddings
+    ///
+    /// Use `encode_prompt()` first to get embeddings, then call this method
+    /// for each generation. Useful for comparisons where the same prompt is used.
+    ///
+    /// # Returns
+    /// PNG image data as Vec<u8>
+    pub fn generate_with_embeddings(
+        &self,
+        flux: &FluxModel,
+        t5_emb: &Tensor,
+        clip_emb: &Tensor,
+        steps: usize,
+        width: usize,
+        height: usize,
+        seed: u64,
+    ) -> Result<Vec<u8>> {
+        info!(
+            steps = steps,
+            size = format!("{}x{}", width, height),
+            seed = seed,
+            "Starting generation with pre-computed embeddings"
+        );
+
+        // Denoise with FLUX
+        info!("Denoising with FLUX ({} steps)", steps);
+        let latents = self.denoise(flux, t5_emb, clip_emb, height, width, steps, seed)?;
+        debug!(shape = ?latents.dims(), "Latents generated");
+
+        // Load VAE, decode, then drop
+        info!("Decoding latents to RGB");
+        let rgb_data = {
+            let vae = VaeDecoder::load(&self.vae_safetensors_path, self.device.clone())?;
+
+            let latents_for_vae = if self.device.is_cuda() {
+                latents.to_dtype(DType::BF16)?
+            } else {
+                latents
+            };
+
+            let image = vae.decode(&latents_for_vae)?;
+            debug!(shape = ?image.dims(), "Image decoded");
+
+            let rgb = vae.tensor_to_rgb(&image)?;
+            rgb
+        };
+
+        // Convert to PNG
+        info!("Encoding PNG");
+        let png_data = self.encode_png(&rgb_data, width as u32, height as u32)?;
+
+        info!(size_kb = png_data.len() / 1024, "✓ Generation complete!");
+
+        Ok(png_data)
+    }
+
     /// Generate an image from a text prompt using FLUX transformer
     ///
     /// Uses sequential model loading to minimize VRAM usage:
@@ -95,61 +180,11 @@ impl FluxPipeline {
             "Starting generation (sequential loading)"
         );
 
-        // Step 1: Load T5, encode, then drop to free VRAM
-        info!("Step 1/5: Encoding prompt with T5");
-        let t5_emb = {
-            let mut t5 = T5TextEncoder::load(&self.t5_gguf_path, &self.t5_tokenizer_path, self.device.clone())?;
-            let emb = t5.encode(prompt)?;
-            debug!(shape = ?emb.dims(), "T5 encoded");
-            // t5 dropped here, freeing ~9GB
-            emb
-        };
+        // Encode prompt (loads T5, CLIP, then drops them)
+        let (t5_emb, clip_emb) = self.encode_prompt(prompt)?;
 
-        // Step 2: Load CLIP, encode, then drop to free VRAM
-        info!("Step 2/5: Encoding prompt with CLIP");
-        let clip_emb = {
-            let mut clip = ClipTextEncoder::load(&self.clip_safetensors_path, &self.clip_tokenizer_path, self.device.clone())?;
-            let emb = clip.encode(prompt)?;
-            debug!(shape = ?emb.dims(), "CLIP encoded");
-            // clip dropped here, freeing ~350MB
-            emb
-        };
-
-        // Step 3: Denoise with FLUX (FLUX already loaded by caller)
-        info!("Step 3/5: Denoising with FLUX ({} steps)", steps);
-        let latents = self.denoise(flux, &t5_emb, &clip_emb, height, width, steps, seed)?;
-        debug!(shape = ?latents.dims(), "Latents generated");
-
-        // At this point, caller should drop FLUX to free ~12GB before VAE loading
-        // (done in compare.rs)
-
-        // Step 4: Load VAE, decode, then drop
-        info!("Step 4/5: Decoding latents to RGB");
-        let rgb_data = {
-            let vae = VaeDecoder::load(&self.vae_safetensors_path, self.device.clone())?;
-
-            // Convert to BF16 for VAE (VAE expects BF16 on CUDA, F32 on CPU)
-            let latents_for_vae = if self.device.is_cuda() {
-                latents.to_dtype(DType::BF16)?
-            } else {
-                latents
-            };
-
-            let image = vae.decode(&latents_for_vae)?;
-            debug!(shape = ?image.dims(), "Image decoded");
-
-            let rgb = vae.tensor_to_rgb(&image)?;
-            // vae dropped here, freeing ~350MB
-            rgb
-        };
-
-        // Step 5: Convert to PNG
-        info!("Step 5/5: Encoding PNG");
-        let png_data = self.encode_png(&rgb_data, width as u32, height as u32)?;
-
-        info!(size_kb = png_data.len() / 1024, "✓ Generation complete!");
-
-        Ok(png_data)
+        // Generate with embeddings
+        self.generate_with_embeddings(flux, &t5_emb, &clip_emb, steps, width, height, seed)
     }
 
     /// Denoise latents using FLUX transformer with Euler sampling

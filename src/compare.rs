@@ -62,6 +62,14 @@ pub fn compare_with_without_lora<P: AsRef<Path>>(
     let device = pipeline.device().clone();
 
     // ========================================================================
+    // OPTIMIZE: Encode prompt once, reuse for both generations
+    // ========================================================================
+    info!("Encoding prompt (will be reused for both generations)");
+    let (t5_emb, clip_emb) = pipeline.encode_prompt(prompt)?;
+    info!("✓ Prompt encoded, embeddings ready");
+    info!("");
+
+    // ========================================================================
     // BASELINE: Generate without LoRA
     // ========================================================================
     info!("┌─ Baseline Generation (No LoRA) ──────────────────────┐");
@@ -74,7 +82,7 @@ pub fn compare_with_without_lora<P: AsRef<Path>>(
             &device,
         )?;
 
-        let png = pipeline.generate(&flux_baseline, prompt, 28, 1024, 1024, seed)?;
+        let png = pipeline.generate_with_embeddings(&flux_baseline, &t5_emb, &clip_emb, 28, 1024, 1024, seed)?;
 
         // Explicitly drop FLUX model to free VRAM before next generation
         drop(flux_baseline);
@@ -115,7 +123,7 @@ pub fn compare_with_without_lora<P: AsRef<Path>>(
             &device,
         )?;
 
-        let png = pipeline.generate(&flux_with_lora, prompt, 28, 1024, 1024, seed)?;
+        let png = pipeline.generate_with_embeddings(&flux_with_lora, &t5_emb, &clip_emb, 28, 1024, 1024, seed)?;
 
         // Explicitly drop FLUX model to free VRAM
         drop(flux_with_lora);
