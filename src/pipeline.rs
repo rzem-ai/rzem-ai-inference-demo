@@ -77,12 +77,22 @@ impl FluxPipeline {
 
             let emb = t5.encode(prompt)?;
             info!("  ✓ T5 encoded: shape {:?}", emb.dims());
-            // t5 dropped here, freeing ~9GB
+
+            // Explicitly drop T5 before leaving scope
+            drop(t5);
             emb
         };
 
+        // Force CUDA to actually free T5 memory
+        if self.device.is_cuda() {
+            if let Err(e) = self.device.synchronize() {
+                debug!("Device synchronization warning: {}", e);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+
         // Verify T5 was actually freed
-        self.log_gpu_memory("After T5 drop");
+        self.log_gpu_memory("After T5 drop + sync");
         info!("");
 
         // Load CLIP, encode, then drop
@@ -93,12 +103,22 @@ impl FluxPipeline {
 
             let emb = clip.encode(prompt)?;
             info!("  ✓ CLIP encoded: shape {:?}", emb.dims());
-            // clip dropped here, freeing ~350MB
+
+            // Explicitly drop CLIP before leaving scope
+            drop(clip);
             emb
         };
 
+        // Force CUDA to actually free CLIP memory
+        if self.device.is_cuda() {
+            if let Err(e) = self.device.synchronize() {
+                debug!("Device synchronization warning: {}", e);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+
         // Verify CLIP was actually freed
-        self.log_gpu_memory("After CLIP drop");
+        self.log_gpu_memory("After CLIP drop + sync");
         info!("");
 
         Ok((t5_emb, clip_emb))
