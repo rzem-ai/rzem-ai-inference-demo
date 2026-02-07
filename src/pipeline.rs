@@ -66,20 +66,22 @@ impl FluxPipeline {
     /// (T5 embeddings, CLIP embeddings)
     pub fn encode_prompt(&self, prompt: &str) -> Result<(Tensor, Tensor)> {
         // Load T5, encode, then drop
-        info!("Encoding prompt with T5");
+        info!("Step 1/2: Encoding prompt with T5");
         let t5_emb = {
             let mut t5 = T5TextEncoder::load(&self.t5_gguf_path, &self.t5_tokenizer_path, self.device.clone())?;
             let emb = t5.encode(prompt)?;
-            debug!(shape = ?emb.dims(), "T5 encoded");
+            info!("  ✓ T5 encoded: shape {:?}", emb.dims());
+            // t5 dropped here, freeing ~9GB
             emb
         };
 
         // Load CLIP, encode, then drop
-        info!("Encoding prompt with CLIP");
+        info!("Step 2/2: Encoding prompt with CLIP");
         let clip_emb = {
-            let mut clip = ClipTextEncoder::load(&self.clip_safetensors_path, &self.clip_tokenizer_path, self.device.clone())?;
+            let clip = ClipTextEncoder::load(&self.clip_safetensors_path, &self.clip_tokenizer_path, self.device.clone())?;
             let emb = clip.encode(prompt)?;
-            debug!(shape = ?emb.dims(), "CLIP encoded");
+            info!("  ✓ CLIP encoded: shape {:?}", emb.dims());
+            // clip dropped here, freeing ~350MB
             emb
         };
 
@@ -103,20 +105,23 @@ impl FluxPipeline {
         height: usize,
         seed: u64,
     ) -> Result<Vec<u8>> {
-        info!(
-            steps = steps,
-            size = format!("{}x{}", width, height),
-            seed = seed,
-            "Starting generation with pre-computed embeddings"
-        );
+        info!("");
+        info!("════════════════════════════════════════════════════════");
+        info!("Starting generation with pre-computed embeddings");
+        info!("  Size: {}x{}", width, height);
+        info!("  Steps: {}", steps);
+        info!("  Seed: {}", seed);
+        info!("════════════════════════════════════════════════════════");
+        info!("");
 
         // Denoise with FLUX
-        info!("Denoising with FLUX ({} steps)", steps);
+        info!("Step 1/3: Denoising with FLUX ({} steps)", steps);
         let latents = self.denoise(flux, t5_emb, clip_emb, height, width, steps, seed)?;
-        debug!(shape = ?latents.dims(), "Latents generated");
+        info!("  ✓ Latents generated: shape {:?}", latents.dims());
+        info!("");
 
         // Load VAE, decode, then drop
-        info!("Decoding latents to RGB");
+        info!("Step 2/3: Decoding latents to RGB");
         let rgb_data = {
             let vae = VaeDecoder::load(&self.vae_safetensors_path, self.device.clone())?;
 
@@ -127,17 +132,22 @@ impl FluxPipeline {
             };
 
             let image = vae.decode(&latents_for_vae)?;
-            debug!(shape = ?image.dims(), "Image decoded");
+            info!("  ✓ Image decoded: shape {:?}", image.dims());
 
             let rgb = vae.tensor_to_rgb(&image)?;
+            // vae dropped here, freeing ~350MB
             rgb
         };
 
         // Convert to PNG
-        info!("Encoding PNG");
+        info!("Step 3/3: Encoding PNG");
         let png_data = self.encode_png(&rgb_data, width as u32, height as u32)?;
+        info!("  ✓ PNG encoded: {} KB", png_data.len() / 1024);
+        info!("");
 
-        info!(size_kb = png_data.len() / 1024, "✓ Generation complete!");
+        info!("════════════════════════════════════════════════════════");
+        info!("✓ Generation complete!");
+        info!("════════════════════════════════════════════════════════");
 
         Ok(png_data)
     }
@@ -222,19 +232,20 @@ impl FluxPipeline {
         };
 
         // Create sampling state
-        info!(
+        debug!(
             t5_shape = ?t5_emb.dims(),
             clip_shape = ?clip_emb.dims(),
             img_shape = ?img.dims(),
             "Creating FLUX sampling state"
         );
         let state = flux::sampling::State::new(&t5_emb, &clip_emb, &img)?;
-        info!(
+        debug!(
             txt_shape = ?state.txt.dims(),
             vec_shape = ?state.vec.dims(),
             img_shape = ?state.img.dims(),
             "FLUX state created"
         );
+        info!("  ✓ Sampling state created");
 
         // Get timestep schedule (normal/linear schedule for FLUX.1-dev)
         let timesteps = get_timesteps_normal(steps);
@@ -337,7 +348,7 @@ fn denoise_euler_quantized(
         img = (img + v_scaled)?;
 
         if (i + 1) % 5 == 0 || i + 1 == total_steps {
-            debug!(step = i + 1, total = total_steps, "Denoising progress");
+            info!("  Progress: step {}/{} ({:.0}%)", i + 1, total_steps, (i + 1) as f32 / total_steps as f32 * 100.0);
         }
     }
 
@@ -384,7 +395,7 @@ fn denoise_euler_full(
         img = (img + v_scaled)?;
 
         if (i + 1) % 5 == 0 || i + 1 == total_steps {
-            debug!(step = i + 1, total = total_steps, "Denoising progress");
+            info!("  Progress: step {}/{} ({:.0}%)", i + 1, total_steps, (i + 1) as f32 / total_steps as f32 * 100.0);
         }
     }
 

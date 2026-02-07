@@ -507,15 +507,27 @@ impl FluxModel {
 
         // If no LoRAs, load model directly
         if loras.is_empty() {
-            info!("Loading model without LoRAs");
+            info!("════════════════════════════════════════════════════════");
+            info!("Loading FLUX.1-dev (full precision BF16)");
+            info!("════════════════════════════════════════════════════════");
+            info!("  Model: {}", safetensors_path.display());
+            info!("  Device: {:?}", device);
+            info!("  DType: {:?}", dtype);
+            info!("  Expected VRAM: ~24GB");
+            info!("");
+
             let vb = unsafe {
                 VarBuilder::from_mmaped_safetensors(&[safetensors_path], dtype, device)?
             };
 
+            info!("  Building FLUX model...");
             let cfg = flux::model::Config::dev();
             let model = flux::model::Flux::new(&cfg, vb)?;
 
-            info!("✓ FLUX model loaded in BF16");
+            info!("");
+            info!("✓ FLUX model loaded successfully");
+            info!("════════════════════════════════════════════════════════");
+            info!("");
 
             return Ok(Self::FullPrecision {
                 model,

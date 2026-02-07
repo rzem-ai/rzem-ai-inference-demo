@@ -147,12 +147,62 @@ async fn main() -> Result<()> {
             }
 
             println!();
-            println!("Initializing FLUX.1-dev pipeline...");
+            println!("════════════════════════════════════════════════════════");
+            println!("🚀 Initializing FLUX.1-dev Pipeline (Full Precision BF16)");
+            println!("════════════════════════════════════════════════════════");
             println!();
 
-            // Initialize device
-            let device = candle_core::Device::cuda_if_available(0)?;
-            println!("Using device: {:?}", device);
+            // Detect and display all available GPUs
+            println!("🔍 Detecting GPU devices...");
+            println!();
+
+            #[cfg(feature = "cuda")]
+            {
+                // Try to get GPU info using nvidia-smi
+                let gpu_info = std::process::Command::new("nvidia-smi")
+                    .args(&["--query-gpu=index,name,memory.total,memory.free", "--format=csv,noheader,nounits"])
+                    .output();
+
+                if let Ok(output) = gpu_info {
+                    if output.status.success() {
+                        let gpu_list = String::from_utf8_lossy(&output.stdout);
+                        println!("Available GPUs:");
+                        for line in gpu_list.lines() {
+                            let parts: Vec<&str> = line.split(',').collect();
+                            if parts.len() >= 4 {
+                                println!("  GPU {}: {} - {}MB total, {}MB free",
+                                    parts[0].trim(),
+                                    parts[1].trim(),
+                                    parts[2].trim(),
+                                    parts[3].trim()
+                                );
+                            }
+                        }
+                        println!();
+                    }
+                }
+            }
+
+            // Initialize device - explicitly use GPU 0
+            println!("📌 Selecting GPU device 0...");
+            let device = candle_core::Device::new_cuda(0)
+                .or_else(|_| candle_core::Device::cuda_if_available(0))?;
+
+            println!("✓ Using device: {:?}", device);
+
+            // Verify we got the right device
+            match &device {
+                candle_core::Device::Cuda(cuda_device) => {
+                    println!("  CUDA Device ID: {:?}", cuda_device);
+                    println!("  Expected: RTX 5090 (32GB VRAM)");
+                }
+                candle_core::Device::Metal(metal_device) => {
+                    println!("  Metal Device ID: {:?}", metal_device);
+                }
+                candle_core::Device::Cpu => {
+                    println!("  ⚠️  WARNING: Using CPU (will be very slow!)");
+                }
+            }
             println!();
 
             // Download models if needed
