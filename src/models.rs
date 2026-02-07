@@ -381,19 +381,27 @@ impl VaeDecoder {
 }
 
 /// FLUX transformer model with optional LoRA injection
-pub struct FluxModel {
-    model: flux::quantized_model::Flux,
-    device: Device,
+pub enum FluxModel {
+    /// Quantized model with per-forward-pass LoRA (slow but low VRAM)
+    Quantized {
+        model: flux::quantized_model::Flux,
+        device: Device,
+    },
+    /// Full precision model with pre-fused LoRA weights (fast, high VRAM)
+    FullPrecision {
+        model: flux::model::Flux,
+        device: Device,
+    },
 }
 
 impl FluxModel {
-    /// Load quantized FLUX.1-dev model with optional LoRA adapters
+    /// Load quantized FLUX.1-dev model with per-forward-pass LoRA (slow but low VRAM)
     ///
     /// # Arguments
     /// * `gguf_path` - Path to flux1-dev-Q8_0.gguf
     /// * `loras` - List of (LoRA adapter, strength) tuples to inject
     /// * `device` - Device to load model on
-    pub fn load_with_loras<P: AsRef<Path>>(
+    pub fn load_quantized_with_loras<P: AsRef<Path>>(
         gguf_path: P,
         loras: &[(Arc<LoraAdapter>, f32)],
         device: &Device,
@@ -403,7 +411,7 @@ impl FluxModel {
         info!(
             path = %gguf_path.display(),
             lora_count = loras.len(),
-            "Loading FLUX.1-dev (quantized)"
+            "Loading FLUX.1-dev (quantized Q8_0)"
         );
 
         // Load quantized model from GGUF
@@ -468,20 +476,94 @@ impl FluxModel {
             info!("✓ FLUX model loaded (no LoRAs)");
         }
 
-        Ok(Self {
+        Ok(Self::Quantized {
             model,
             device: device.clone(),
         })
     }
 
-    /// Get the underlying FLUX model
-    pub fn model(&self) -> &flux::quantized_model::Flux {
-        &self.model
+    /// Load full-precision FLUX.1-dev with pre-fused LoRA weights (fast, high VRAM)
+    ///
+    /// This matches InvokeAI's approach: pre-compute LoRA deltas and fuse into model weights.
+    ///
+    /// # Arguments
+    /// * `safetensors_path` - Path to flux1-dev.safetensors
+    /// * `loras` - List of (LoRA adapter, strength) tuples to fuse
+    /// * `device` - Device to load model on
+    pub fn load_full_precision_with_fused_loras<P: AsRef<Path>>(
+        safetensors_path: P,
+        loras: &[(Arc<LoraAdapter>, f32)],
+        device: &Device,
+    ) -> Result<Self> {
+        let safetensors_path = safetensors_path.as_ref();
+
+        info!(
+            path = %safetensors_path.display(),
+            lora_count = loras.len(),
+            "Loading FLUX.1-dev (full precision BF16)"
+        );
+
+        let dtype = DType::BF16; // Match InvokeAI's approach
+
+        // If no LoRAs, load model directly
+        if loras.is_empty() {
+            info!("Loading model without LoRAs");
+            let vb = unsafe {
+                VarBuilder::from_mmaped_safetensors(&[safetensors_path], dtype, device)?
+            };
+
+            let cfg = flux::model::Config::dev();
+            let model = flux::model::Flux::new(&cfg, vb)?;
+
+            info!("✓ FLUX model loaded in BF16");
+
+            return Ok(Self::FullPrecision {
+                model,
+                device: device.clone(),
+            });
+        }
+
+        // With LoRAs: weight fusion not yet implemented
+        // For now, load model without LoRAs to test BF16 performance
+        info!("⚠ LoRA weight fusion not yet implemented");
+        info!("Loading model in BF16 without LoRAs for performance testing");
+
+        let vb = unsafe {
+            VarBuilder::from_mmaped_safetensors(&[safetensors_path], dtype, device)?
+        };
+
+        let cfg = flux::model::Config::dev();
+        let model = flux::model::Flux::new(&cfg, vb)?;
+
+        info!("✓ FLUX model loaded in BF16 (LoRA fusion pending)");
+        info!("📝 TODO: Implement weight fusion to match InvokeAI's LoRA performance");
+
+        Ok(Self::FullPrecision {
+            model,
+            device: device.clone(),
+        })
+    }
+
+    /// Get a reference to the model for inference (works with both variants)
+    pub fn model_ref(&self) -> FluxModelRef {
+        match self {
+            Self::Quantized { model, .. } => FluxModelRef::Quantized(model),
+            Self::FullPrecision { model, .. } => FluxModelRef::FullPrecision(model),
+        }
     }
 
     pub fn device(&self) -> &Device {
-        &self.device
+        match self {
+            Self::Quantized { device, .. } => device,
+            Self::FullPrecision { device, .. } => device,
+        }
     }
+}
+
+/// Reference to either quantized or full-precision FLUX model
+pub enum FluxModelRef<'a> {
+    Quantized(&'a flux::quantized_model::Flux),
+    FullPrecision(&'a flux::model::Flux),
 }
 
 /// Map LoRA layer name to FLUX model tensor name

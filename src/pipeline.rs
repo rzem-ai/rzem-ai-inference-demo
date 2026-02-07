@@ -201,12 +201,25 @@ impl FluxPipeline {
         // Create initial noise
         let img = self.create_noise(height, width, seed)?;
 
-        // Convert embeddings to F32 (quantized models use F32)
-        let (t5_emb, clip_emb, img) = (
-            t5_emb.to_dtype(DType::F32)?,
-            clip_emb.to_dtype(DType::F32)?,
-            img.to_dtype(DType::F32)?,
-        );
+        // Convert embeddings to appropriate dtype
+        let (t5_emb, clip_emb, img) = match flux {
+            FluxModel::Quantized { .. } => {
+                // Quantized models use F32
+                (
+                    t5_emb.to_dtype(DType::F32)?,
+                    clip_emb.to_dtype(DType::F32)?,
+                    img.to_dtype(DType::F32)?,
+                )
+            }
+            FluxModel::FullPrecision { .. } => {
+                // Full precision uses BF16
+                (
+                    t5_emb.to_dtype(DType::BF16)?,
+                    clip_emb.to_dtype(DType::BF16)?,
+                    img.to_dtype(DType::BF16)?,
+                )
+            }
+        };
 
         // Create sampling state
         info!(
@@ -226,9 +239,16 @@ impl FluxPipeline {
         // Get timestep schedule (normal/linear schedule for FLUX.1-dev)
         let timesteps = get_timesteps_normal(steps);
 
-        // Run Euler sampling
+        // Run Euler sampling (handles both model types)
         let guidance = 3.5; // Standard guidance for FLUX.1-dev
-        let denoised = denoise_euler(flux.model(), &state, &timesteps, guidance, &self.device)?;
+        let denoised = match flux {
+            FluxModel::Quantized { model, .. } => {
+                denoise_euler_quantized(model, &state, &timesteps, guidance, &self.device)?
+            }
+            FluxModel::FullPrecision { model, .. } => {
+                denoise_euler_full(model, &state, &timesteps, guidance, &self.device)?
+            }
+        };
 
         // Unpack to proper shape for VAE
         let unpacked = flux::sampling::unpack(&denoised, height, width)?;
@@ -279,8 +299,55 @@ fn get_timesteps_normal(steps: usize) -> Vec<f64> {
 
 /// Euler sampler for quantized FLUX models
 /// Standard first-order ODE solver: x_{t+1} = x_t + (t_next - t_curr) * velocity
-fn denoise_euler(
+fn denoise_euler_quantized(
     model: &flux::quantized_model::Flux,
+    state: &flux::sampling::State,
+    timesteps: &[f64],
+    guidance: f64,
+    device: &Device,
+) -> Result<Tensor> {
+    let mut img = state.img.clone();
+    let b_sz = img.dim(0)?;
+
+    // Create guidance tensor
+    let guidance_tensor = Tensor::full(guidance as f32, b_sz, device)?;
+
+    let total_steps = timesteps.len() - 1;
+
+    for (i, window) in timesteps.windows(2).enumerate() {
+        let t_curr = window[0];
+        let t_next = window[1];
+
+        let t_vec = Tensor::full(t_curr as f32, b_sz, device)?;
+
+        // Get velocity prediction from model
+        let v = model.forward(
+            &img,
+            &state.img_ids,
+            &state.txt,
+            &state.txt_ids,
+            &t_vec,
+            &state.vec,
+            Some(&guidance_tensor),
+        )?;
+
+        // Euler step: x = x + dt * v
+        let dt = t_next - t_curr;
+        let v_scaled = (v * dt)?;
+        img = (img + v_scaled)?;
+
+        if (i + 1) % 5 == 0 || i + 1 == total_steps {
+            debug!(step = i + 1, total = total_steps, "Denoising progress");
+        }
+    }
+
+    Ok(img)
+}
+
+/// Euler sampler for full-precision FLUX models
+/// Standard first-order ODE solver: x_{t+1} = x_t + (t_next - t_curr) * velocity
+fn denoise_euler_full(
+    model: &flux::model::Flux,
     state: &flux::sampling::State,
     timesteps: &[f64],
     guidance: f64,

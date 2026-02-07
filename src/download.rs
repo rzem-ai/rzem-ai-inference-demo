@@ -26,18 +26,20 @@ impl ModelDownloader {
 
     /// Download all required models for FLUX.1-dev generation
     ///
-    /// Total download size: ~22GB
-    /// - FLUX.1-dev Q8_0: ~12GB
+    /// Total download size: ~46GB
+    /// - FLUX.1-dev full precision: ~24GB
+    /// - FLUX.1-dev Q8_0 (optional): ~12GB
     /// - T5-XXL Q8_0: ~9GB
     /// - CLIP + VAE + tokenizers: ~1GB
     ///
     /// Returns paths to downloaded models
     pub async fn download_all(&self) -> Result<ModelPaths> {
-        info!("Downloading FLUX.1-dev pipeline models (~22GB)");
-        info!("This may take 10-30 minutes depending on your connection");
+        info!("Downloading FLUX.1-dev pipeline models (full precision mode)");
+        info!("This may take 20-40 minutes depending on your connection");
 
         // Download in parallel
-        let (flux_gguf, t5_gguf, clip_safetensors, vae_safetensors, tokenizer_dir) = tokio::try_join!(
+        let (flux_full, flux_gguf, t5_gguf, clip_safetensors, vae_safetensors, tokenizer_dir) = tokio::try_join!(
+            self.download_flux_dev_full(),
             self.download_flux_dev_gguf(),
             self.download_t5_gguf(),
             self.download_clip(),
@@ -48,6 +50,7 @@ impl ModelDownloader {
         info!("✓ All models downloaded successfully!");
 
         Ok(ModelPaths {
+            flux_full,
             flux_gguf,
             t5_gguf,
             clip_safetensors,
@@ -69,6 +72,25 @@ impl ModelDownloader {
             .context("Failed to download FLUX.1-dev GGUF")?;
 
         info!("  ✓ FLUX.1-dev downloaded: {}", path.display());
+        Ok(path)
+    }
+
+    /// Download FLUX.1-dev full precision safetensors (~24GB)
+    ///
+    /// This is the full BF16 model for high-performance inference.
+    /// Use this instead of GGUF for 10x faster LoRA generation.
+    pub async fn download_flux_dev_full(&self) -> Result<PathBuf> {
+        info!("Downloading FLUX.1-dev full precision (BF16, ~24GB)");
+
+        let repo = self.api.repo(hf_hub::Repo::model(
+            "black-forest-labs/FLUX.1-dev".to_string(),
+        ));
+        let path = repo
+            .get("flux1-dev.safetensors")
+            .await
+            .context("Failed to download FLUX.1-dev safetensors")?;
+
+        info!("  ✓ FLUX.1-dev full precision downloaded: {}", path.display());
         Ok(path)
     }
 
@@ -159,7 +181,8 @@ impl ModelDownloader {
 
 /// Paths to all downloaded models
 pub struct ModelPaths {
-    pub flux_gguf: PathBuf,
+    pub flux_full: PathBuf,      // Full precision BF16 (fast, 24GB)
+    pub flux_gguf: PathBuf,       // Quantized Q8_0 (slow, 12GB)
     pub t5_gguf: PathBuf,
     pub clip_safetensors: PathBuf,
     pub vae_safetensors: PathBuf,

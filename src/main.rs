@@ -173,8 +173,8 @@ async fn main() -> Result<()> {
 
             // Run comparison
             let result = compare_with_without_lora(
-                &mut pipeline,
-                &paths.flux_gguf,
+                &pipeline,
+                &paths.flux_full,  // Use full-precision model
                 &prompt,
                 &lora,
                 strength,

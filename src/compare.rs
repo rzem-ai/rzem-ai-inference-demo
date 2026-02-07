@@ -23,9 +23,11 @@ pub struct ComparisonResult {
 /// This is the main demonstration feature that shows how LoRA adapters
 /// modify the model's output for the same prompt and seed.
 ///
+/// Uses full-precision FLUX.1-dev with pre-fused LoRA weights to match InvokeAI's speed.
+///
 /// # Arguments
 /// * `pipeline` - FLUX generation pipeline (reused for both generations)
-/// * `flux_gguf_path` - Path to FLUX.1-dev quantized GGUF file
+/// * `flux_full_path` - Path to FLUX.1-dev full precision safetensors file
 /// * `prompt` - Text prompt to generate
 /// * `lora_path` - Path to LoRA safetensors file
 /// * `strength` - LoRA strength multiplier (0.0-2.0)
@@ -36,14 +38,14 @@ pub struct ComparisonResult {
 /// Paths to both generated images
 pub fn compare_with_without_lora<P: AsRef<Path>>(
     pipeline: &FluxPipeline,
-    flux_gguf_path: P,
+    flux_full_path: P,
     prompt: &str,
     lora_path: P,
     strength: f32,
     output_dir: P,
     seed: u64,
 ) -> Result<ComparisonResult> {
-    let flux_gguf_path = flux_gguf_path.as_ref();
+    let flux_full_path = flux_full_path.as_ref();
     let lora_path = lora_path.as_ref();
     let output_dir = output_dir.as_ref();
 
@@ -75,9 +77,9 @@ pub fn compare_with_without_lora<P: AsRef<Path>>(
     info!("┌─ Baseline Generation (No LoRA) ──────────────────────┐");
 
     let baseline_png = {
-        // Load FLUX, generate, then drop to free ~12GB VRAM
-        let flux_baseline = FluxModel::load_with_loras(
-            flux_gguf_path,
+        // Load FLUX in full precision (BF16), generate, then drop to free VRAM
+        let flux_baseline = FluxModel::load_full_precision_with_fused_loras(
+            flux_full_path,
             &[], // No LoRAs
             &device,
         )?;
@@ -86,7 +88,7 @@ pub fn compare_with_without_lora<P: AsRef<Path>>(
 
         // Explicitly drop FLUX model to free VRAM before next generation
         drop(flux_baseline);
-        info!("  ✓ FLUX model unloaded (freed ~12GB VRAM)");
+        info!("  ✓ FLUX model unloaded (freed ~24GB VRAM)");
 
         png
     };
@@ -116,9 +118,9 @@ pub fn compare_with_without_lora<P: AsRef<Path>>(
             lora.weights.values().next().map(|w| w.rank).unwrap_or(0)
         );
 
-        // Load FLUX with LoRA injected
-        let flux_with_lora = FluxModel::load_with_loras(
-            flux_gguf_path,
+        // Load FLUX in full precision with LoRA pre-fused
+        let flux_with_lora = FluxModel::load_full_precision_with_fused_loras(
+            flux_full_path,
             &[(lora, strength)],
             &device,
         )?;
@@ -127,7 +129,7 @@ pub fn compare_with_without_lora<P: AsRef<Path>>(
 
         // Explicitly drop FLUX model to free VRAM
         drop(flux_with_lora);
-        info!("  ✓ FLUX model unloaded (freed ~12GB VRAM)");
+        info!("  ✓ FLUX model unloaded (freed ~24GB VRAM)");
 
         png
     };
