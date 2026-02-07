@@ -77,20 +77,15 @@ pub fn compare_with_without_lora<P: AsRef<Path>>(
     info!("┌─ Baseline Generation (No LoRA) ──────────────────────┐");
 
     let baseline_png = {
-        // Load FLUX in full precision (BF16), generate, then drop to free VRAM
+        // Load FLUX in full precision (BF16)
         let flux_baseline = FluxModel::load_full_precision_with_fused_loras(
             flux_full_path,
             &[], // No LoRAs
             &device,
         )?;
 
-        let png = pipeline.generate_with_embeddings(&flux_baseline, &t5_emb, &clip_emb, 28, 1024, 1024, seed)?;
-
-        // Explicitly drop FLUX model to free VRAM before next generation
-        drop(flux_baseline);
-        info!("  ✓ FLUX model unloaded (freed ~24GB VRAM)");
-
-        png
+        // Generate (consumes flux_baseline, freeing VRAM before VAE loads)
+        pipeline.generate_with_embeddings(flux_baseline, &t5_emb, &clip_emb, 28, 1024, 1024, seed)?
     };
 
     let baseline_path = output_dir.join("baseline.png");
@@ -125,13 +120,8 @@ pub fn compare_with_without_lora<P: AsRef<Path>>(
             &device,
         )?;
 
-        let png = pipeline.generate_with_embeddings(&flux_with_lora, &t5_emb, &clip_emb, 28, 1024, 1024, seed)?;
-
-        // Explicitly drop FLUX model to free VRAM
-        drop(flux_with_lora);
-        info!("  ✓ FLUX model unloaded (freed ~24GB VRAM)");
-
-        png
+        // Generate (consumes flux_with_lora, freeing VRAM before VAE loads)
+        pipeline.generate_with_embeddings(flux_with_lora, &t5_emb, &clip_emb, 28, 1024, 1024, seed)?
     };
 
     let with_lora_path = output_dir.join("with_lora.png");

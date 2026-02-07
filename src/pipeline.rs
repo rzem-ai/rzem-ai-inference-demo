@@ -97,7 +97,7 @@ impl FluxPipeline {
     /// PNG image data as Vec<u8>
     pub fn generate_with_embeddings(
         &self,
-        flux: &FluxModel,
+        flux: FluxModel,  // Take ownership to enable dropping before VAE
         t5_emb: &Tensor,
         clip_emb: &Tensor,
         steps: usize,
@@ -116,8 +116,13 @@ impl FluxPipeline {
 
         // Denoise with FLUX
         info!("Step 1/3: Denoising with FLUX ({} steps)", steps);
-        let latents = self.denoise(flux, t5_emb, clip_emb, height, width, steps, seed)?;
+        let latents = self.denoise(&flux, t5_emb, clip_emb, height, width, steps, seed)?;
         info!("  ✓ Latents generated: shape {:?}", latents.dims());
+        info!("");
+
+        // CRITICAL: Drop FLUX before loading VAE to free ~24GB VRAM
+        drop(flux);
+        info!("  ✓ FLUX model unloaded (freed ~24GB VRAM)");
         info!("");
 
         // Load VAE, decode, then drop
@@ -175,7 +180,7 @@ impl FluxPipeline {
     /// PNG image data as Vec<u8>
     pub fn generate(
         &self,
-        flux: &FluxModel,
+        flux: FluxModel,  // Take ownership to enable dropping before VAE
         prompt: &str,
         steps: usize,
         width: usize,
@@ -193,7 +198,7 @@ impl FluxPipeline {
         // Encode prompt (loads T5, CLIP, then drops them)
         let (t5_emb, clip_emb) = self.encode_prompt(prompt)?;
 
-        // Generate with embeddings
+        // Generate with embeddings (consumes flux)
         self.generate_with_embeddings(flux, &t5_emb, &clip_emb, steps, width, height, seed)
     }
 
