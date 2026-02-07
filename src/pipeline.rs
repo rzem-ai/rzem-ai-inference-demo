@@ -67,25 +67,62 @@ impl FluxPipeline {
     pub fn encode_prompt(&self, prompt: &str) -> Result<(Tensor, Tensor)> {
         // Load T5, encode, then drop
         info!("Step 1/2: Encoding prompt with T5");
+
+        // Check memory before T5
+        self.log_gpu_memory("Before T5 load");
+
         let t5_emb = {
             let mut t5 = T5TextEncoder::load(&self.t5_gguf_path, &self.t5_tokenizer_path, self.device.clone())?;
+            self.log_gpu_memory("After T5 load");
+
             let emb = t5.encode(prompt)?;
             info!("  ✓ T5 encoded: shape {:?}", emb.dims());
             // t5 dropped here, freeing ~9GB
             emb
         };
 
+        // Verify T5 was actually freed
+        self.log_gpu_memory("After T5 drop");
+        info!("");
+
         // Load CLIP, encode, then drop
         info!("Step 2/2: Encoding prompt with CLIP");
         let clip_emb = {
             let clip = ClipTextEncoder::load(&self.clip_safetensors_path, &self.clip_tokenizer_path, self.device.clone())?;
+            self.log_gpu_memory("After CLIP load");
+
             let emb = clip.encode(prompt)?;
             info!("  ✓ CLIP encoded: shape {:?}", emb.dims());
             // clip dropped here, freeing ~350MB
             emb
         };
 
+        // Verify CLIP was actually freed
+        self.log_gpu_memory("After CLIP drop");
+        info!("");
+
         Ok((t5_emb, clip_emb))
+    }
+
+    /// Helper to log GPU memory usage
+    fn log_gpu_memory(&self, label: &str) {
+        if self.device.is_cuda() {
+            if let Ok(output) = std::process::Command::new("nvidia-smi")
+                .args(&["--query-gpu=memory.used,memory.free", "--format=csv,noheader,nounits"])
+                .output()
+            {
+                if output.status.success() {
+                    let mem_info = String::from_utf8_lossy(&output.stdout);
+                    if let Some(line) = mem_info.lines().next() {
+                        let parts: Vec<&str> = line.split(',').collect();
+                        if parts.len() >= 2 {
+                            info!("  [{}] {} MB used, {} MB free",
+                                label, parts[0].trim(), parts[1].trim());
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Generate image using pre-computed embeddings
@@ -122,11 +159,58 @@ impl FluxPipeline {
 
         // CRITICAL: Drop FLUX before loading VAE to free ~24GB VRAM
         drop(flux);
-        info!("  ✓ FLUX model unloaded (freed ~24GB VRAM)");
+
+        // Force CUDA to synchronize and actually free the memory
+        if self.device.is_cuda() {
+            // Synchronize to ensure all GPU operations are complete
+            if let Err(e) = self.device.synchronize() {
+                debug!("Device synchronization warning: {}", e);
+            }
+
+            // Query actual GPU memory usage before VAE
+            if let Ok(output) = std::process::Command::new("nvidia-smi")
+                .args(&["--query-gpu=memory.used,memory.free", "--format=csv,noheader,nounits"])
+                .output()
+            {
+                if output.status.success() {
+                    let mem_info = String::from_utf8_lossy(&output.stdout);
+                    if let Some(line) = mem_info.lines().next() {
+                        let parts: Vec<&str> = line.split(',').collect();
+                        if parts.len() >= 2 {
+                            info!("  GPU Memory: {} MB used, {} MB free", parts[0].trim(), parts[1].trim());
+                        }
+                    }
+                }
+            }
+
+            // Small delay to allow CUDA driver to process the deallocation
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+
+        info!("  ✓ FLUX model unloaded");
         info!("");
 
         // Load VAE, decode, then drop
         info!("Step 2/3: Decoding latents to RGB");
+
+        // Check memory before VAE load
+        if self.device.is_cuda() {
+            if let Ok(output) = std::process::Command::new("nvidia-smi")
+                .args(&["--query-gpu=memory.used,memory.free", "--format=csv,noheader,nounits"])
+                .output()
+            {
+                if output.status.success() {
+                    let mem_info = String::from_utf8_lossy(&output.stdout);
+                    if let Some(line) = mem_info.lines().next() {
+                        let parts: Vec<&str> = line.split(',').collect();
+                        if parts.len() >= 2 {
+                            info!("  Before VAE load: {} MB used, {} MB free", parts[0].trim(), parts[1].trim());
+                        }
+                    }
+                }
+            }
+        }
+
         let rgb_data = {
             let vae = VaeDecoder::load(&self.vae_safetensors_path, self.device.clone())?;
 

@@ -77,12 +77,44 @@ pub fn compare_with_without_lora<P: AsRef<Path>>(
     info!("┌─ Baseline Generation (No LoRA) ──────────────────────┐");
 
     let baseline_png = {
+        info!("  Memory before FLUX load:");
+        if let Ok(output) = std::process::Command::new("nvidia-smi")
+            .args(&["--query-gpu=memory.used,memory.free", "--format=csv,noheader,nounits"])
+            .output()
+        {
+            if output.status.success() {
+                let mem_info = String::from_utf8_lossy(&output.stdout);
+                if let Some(line) = mem_info.lines().next() {
+                    let parts: Vec<&str> = line.split(',').collect();
+                    if parts.len() >= 2 {
+                        info!("    {} MB used, {} MB free", parts[0].trim(), parts[1].trim());
+                    }
+                }
+            }
+        }
+
         // Load FLUX in full precision (BF16)
         let flux_baseline = FluxModel::load_full_precision_with_fused_loras(
             flux_full_path,
             &[], // No LoRAs
             &device,
         )?;
+
+        info!("  Memory after FLUX load:");
+        if let Ok(output) = std::process::Command::new("nvidia-smi")
+            .args(&["--query-gpu=memory.used,memory.free", "--format=csv,noheader,nounits"])
+            .output()
+        {
+            if output.status.success() {
+                let mem_info = String::from_utf8_lossy(&output.stdout);
+                if let Some(line) = mem_info.lines().next() {
+                    let parts: Vec<&str> = line.split(',').collect();
+                    if parts.len() >= 2 {
+                        info!("    {} MB used, {} MB free", parts[0].trim(), parts[1].trim());
+                    }
+                }
+            }
+        }
 
         // Generate (consumes flux_baseline, freeing VRAM before VAE loads)
         pipeline.generate_with_embeddings(flux_baseline, &t5_emb, &clip_emb, 28, 1024, 1024, seed)?
